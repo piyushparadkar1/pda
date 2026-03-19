@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python run_simulation.py --calibrate sample_plant_data.csv --profile step1_test --no-ui)",
+      "Bash(python run_simulation.py --profile sda_lube_dao --no-ui --T 60)"
+    ]
+  }
+}
