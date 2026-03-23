@@ -1,0 +1,40 @@
+{
+  "profile_name": "parallel_usable_core_v1",
+  "description": "Parallel PDA usable-core calibration pass after fixing extractor convergence reporting; tuned for a balanced DAO yield/viscosity trade-off across the 110 usable core rows.",
+  "timestamp": "2026-03-22 00:00:00",
+  "row_flag": "usable_core_row",
+  "n_points": 110,
+  "active_params": [
+    "K_multiplier",
+    "E_murphree",
+    "alpha_density"
+  ],
+  "parameters": {
+    "K_multiplier": 0.45,
+    "C_entrain": 0.015,
+    "k_precip": 0.5,
+    "E_murphree": 0.3,
+    "delta_crit": 2.5,
+    "alpha_density": 3.0
+  },
+  "metrics": {
+    "DAO_yield": {
+      "MAE": 6.8967,
+      "RMSE": 7.4048,
+      "bias": -6.8967,
+      "n": 110
+    },
+    "DAO_viscosity": {
+      "MAE": 4.9137,
+      "RMSE": 6.3551,
+      "bias": 2.3732,
+      "n": 110
+    },
+    "convergence": {
+      "n_points": 110,
+      "converged_points": 110,
+      "nonconverged_points": 0,
+      "convergence_pct": 100.0
+    }
+  }
+}

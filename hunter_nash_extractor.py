@@ -61,6 +61,7 @@ def run_extractor(
     prev_DAO_yield = 0.0
     stage_results  = []
     outer_iter     = 0
+    converged      = False
 
     for outer_iter in range(max_outer_iter):
         stage_results  = []
@@ -146,6 +147,7 @@ def run_extractor(
             print(f"  Iter {outer_iter+1:3d}: DAO = {DAO_yield_gross:.2f}%")
 
         if abs(DAO_yield_gross - prev_DAO_yield) < outer_tol and outer_iter >= 3:
+            converged = True
             break
         prev_DAO_yield = DAO_yield_gross
 
@@ -202,7 +204,7 @@ def run_extractor(
         'SARA_DAO':              _sara_in_stream(mass_DAO),
         'SARA_asphalt':          _sara_in_stream(mass_asphalt),
         'stage_results':         stage_results,
-        'converged':             abs(DAO_yield_gross - prev_DAO_yield) < outer_tol,
+        'converged':             converged,
         'outer_iterations':      outer_iter + 1,
         'components':            components,
         'MW_arr':                MW_arr,
