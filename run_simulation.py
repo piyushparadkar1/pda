@@ -13,6 +13,7 @@ Web UI: http://localhost:5000
 
 import argparse
 import json
+import os
 import sys
 import numpy as np
 
@@ -38,6 +39,74 @@ THERMAL_DEFAULTS = {
     'middle_T_blend':      0.55,   # middle bed T blend fraction
     'steam_effectiveness': 0.60,   # fraction of steam enthalpy used for heating
 }
+
+CALIBRATION_PROFILES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'calibration_profiles',
+)
+
+
+def calibration_profile_kind(profile_name: str, payload: dict) -> str:
+    if payload.get('row_flag') is not None or payload.get('active_params') is not None:
+        return 'parallel'
+    if str(profile_name).startswith('parallel_'):
+        return 'parallel'
+    return 'legacy'
+
+
+def list_ui_calibration_profiles() -> list[dict]:
+    profiles = []
+    for fn in sorted(os.listdir(CALIBRATION_PROFILES_DIR)):
+        if not fn.endswith('.json'):
+            continue
+        path = os.path.join(CALIBRATION_PROFILES_DIR, fn)
+        try:
+            with open(path, encoding='utf-8') as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        name = fn[:-5]
+        profiles.append({
+            'name': name,
+            'kind': calibration_profile_kind(name, payload),
+            'description': payload.get('description', ''),
+            'timestamp': payload.get('timestamp', ''),
+            'n_points': payload.get('n_points', '?'),
+            'feed_name': payload.get('feed_name', ''),
+            'row_flag': payload.get('row_flag'),
+            'active_params': payload.get('active_params', []),
+            'parameters': payload.get('parameters', {}),
+            'metrics': payload.get('metrics', {}),
+        })
+    return profiles
+
+
+def load_ui_calibration_profile(profile_name: str) -> dict:
+    path = os.path.join(CALIBRATION_PROFILES_DIR, f'{profile_name}.json')
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Calibration profile '{profile_name}' not found")
+    with open(path, encoding='utf-8') as f:
+        payload = json.load(f)
+    kind = calibration_profile_kind(profile_name, payload)
+    if kind == 'parallel':
+        from parallel_calibration import load_parallel_calibration_profile
+
+        profile = load_parallel_calibration_profile(profile_name)
+        return {
+            'name': profile['profile_name'],
+            'kind': 'parallel',
+            'params': profile.get('parameters', {}),
+            'profile': profile,
+        }
+
+    from plant_calibration import load_profile
+
+    return {
+        'name': profile_name,
+        'kind': 'legacy',
+        'params': load_profile(profile_name),
+        'profile': payload,
+    }
 
 
 def estimate_bed_temperatures(
@@ -236,7 +305,6 @@ def print_summary(r):
 
 # ── Flask Web UI ──────────────────────────────────────────────────────────────
 def launch_web_ui():
-    import os
     import threading
     import webbrowser
     from flask import Flask, render_template_string, request, jsonify
@@ -768,8 +836,7 @@ def launch_web_ui():
     @app.route('/api/calibration/profiles', methods=['GET'])
     def api_calib_profiles():
         try:
-            from plant_calibration import list_profiles
-            return jsonify({'ok': True, 'profiles': list_profiles()})
+            return jsonify({'ok': True, 'profiles': list_ui_calibration_profiles()})
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)})
 
@@ -777,10 +844,15 @@ def launch_web_ui():
     @app.route('/api/calibration/load', methods=['POST'])
     def api_calib_load():
         try:
-            from plant_calibration import load_profile
-            name   = (request.json or {}).get('profile', 'hpcl_default')
-            params = load_profile(name)
-            return jsonify({'ok': True, 'params': params, 'profile': name})
+            name = (request.json or {}).get('profile', 'sda_default')
+            loaded = load_ui_calibration_profile(name)
+            return jsonify({
+                'ok': True,
+                'params': loaded['params'],
+                'profile': loaded['name'],
+                'profile_kind': loaded['kind'],
+                'profile_data': loaded['profile'],
+            })
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)})
 
@@ -808,35 +880,126 @@ def launch_web_ui():
     def api_calib_run():
         try:
             import tempfile
+
+            if request.is_json:
+                d = request.get_json(silent=True) or {}
+                requested_profile = d.get('profile', '')
+                weights_payload = d.get('weights', {})
+                profile_kind = d.get('profile_kind')
+            else:
+                d = request.form.to_dict()
+                requested_profile = d.get('profile', '')
+                weights_payload = {
+                    'DAO_yield': d.get('wt_yield'),
+                    'DAO_viscosity': d.get('wt_viscosity'),
+                    'DAO_CCR': d.get('wt_ccr'),
+                    'DAO_asphaltene': d.get('wt_contam'),
+                }
+                profile_kind = d.get('profile_kind')
+
+            loaded_profile = load_ui_calibration_profile(requested_profile) if requested_profile else None
+            profile_kind = profile_kind or (loaded_profile['kind'] if loaded_profile else 'legacy')
+
+            if profile_kind == 'parallel':
+                from parallel_calibration import (
+                    DEFAULT_PARAMS as PARALLEL_DEFAULT_PARAMS,
+                    ParallelCalibrationWeights,
+                    run_parallel_calibration_from_profile,
+                )
+
+                lims_file = request.files.get('lims_workbook')
+                extractor_file = request.files.get('extractor_workbook')
+                if lims_file is None or extractor_file is None:
+                    return jsonify({'ok': False, 'error': 'Parallel calibration requires both LIMS and extractor workbook files.'})
+
+                with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as lims_tmp, \
+                     tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as extractor_tmp:
+                    lims_file.save(lims_tmp.name)
+                    extractor_file.save(extractor_tmp.name)
+                    lims_path = lims_tmp.name
+                    extractor_path = extractor_tmp.name
+
+                try:
+                    init_params = PARALLEL_DEFAULT_PARAMS.copy()
+                    if request.is_json:
+                        init_params.update({
+                            k: float(v) for k, v in (d.get('init_params') or {}).items()
+                            if k in init_params
+                        })
+                    weights = ParallelCalibrationWeights(
+                        DAO_yield=float(weights_payload.get('DAO_yield') or weights_payload.get('yield') or 1.0),
+                        DAO_viscosity=float(weights_payload.get('DAO_viscosity') or weights_payload.get('viscosity') or 0.2),
+                        DAO_CCR=float(weights_payload.get('DAO_CCR') or weights_payload.get('ccr') or 0.5),
+                        DAO_asphaltene=float(weights_payload.get('DAO_asphaltene') or weights_payload.get('contam') or 5.0),
+                    )
+                    kwargs = {
+                        'weights': weights,
+                        'max_nfev': int(d.get('max_nfev', 150)),
+                        'verbose': False,
+                    }
+                    if request.is_json and d.get('init_params'):
+                        kwargs['init_params'] = init_params
+                    result, df, summary, profile = run_parallel_calibration_from_profile(
+                        lims_path,
+                        extractor_path,
+                        requested_profile,
+                        **kwargs,
+                    )
+                finally:
+                    for tmp_path in [lims_path, extractor_path]:
+                        if os.path.exists(tmp_path):
+                            os.unlink(tmp_path)
+
+                summary_payload = summary.__dict__ if hasattr(summary, '__dict__') else summary
+                return jsonify({
+                    'ok': True,
+                    'success': result.success,
+                    'profile': profile.get('profile_name', requested_profile),
+                    'profile_kind': 'parallel',
+                    'calibrated_params': result.calibrated_params,
+                    'cost_initial': result.cost_initial,
+                    'cost_final': result.cost_final,
+                    'improvement_pct': result.improvement_pct,
+                    'n_points': result.n_operating_points,
+                    'n_evals': result.n_function_evals,
+                    'metrics': result.metrics,
+                    'point_results': result.point_results,
+                    'message': result.message,
+                    'elapsed_s': result.elapsed_s,
+                    'convergence': result.metrics.get('convergence', {}),
+                    'dataset_summary': summary_payload,
+                    'n_rows_loaded': int(len(df)),
+                })
+
             from plant_calibration import (
                 load_plant_data, run_calibration, CalibrationWeights,
                 DEFAULT_PARAMS, plot_calibration_results,
             )
-            d         = request.json or {}
-            csv_data  = d.get('csv_data', '')
-            init_p    = d.get('init_params', {})
-            w         = d.get('weights', {})
+
+            csv_data = d.get('csv_data', '')
+            init_p = d.get('init_params', {})
             save_name = d.get('save_profile', None)
 
-            if not csv_data.strip():
+            if not str(csv_data).strip():
                 return jsonify({'ok': False, 'error': 'No CSV data provided'})
 
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv',
-                                             delete=False, encoding='utf-8') as tf:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8') as tf:
                 tf.write(csv_data)
                 tmp_path = tf.name
 
-            dataset = load_plant_data(tmp_path)
-            os.unlink(tmp_path)
+            try:
+                dataset = load_plant_data(tmp_path)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
             init_params = DEFAULT_PARAMS.copy()
-            init_params.update({k: float(v) for k, v in init_p.items()
-                                if k in init_params})
+            init_params.update({k: float(v) for k, v in init_p.items() if k in init_params})
             weights = CalibrationWeights(
-                DAO_yield   = float(w.get('DAO_yield',   1.00)),
-                DAO_CCR     = float(w.get('DAO_CCR',     0.50)),
-                DAO_density = float(w.get('DAO_density', 50.0)),
-                asph_contam = float(w.get('asph_contam', 5.00)),
+                DAO_yield=float(weights_payload.get('DAO_yield') or weights_payload.get('yield') or 1.00),
+                DAO_CCR=float(weights_payload.get('DAO_CCR') or weights_payload.get('ccr') or 0.50),
+                DAO_density=float(weights_payload.get('DAO_density') or weights_payload.get('density') or 50.0),
+                asph_contam=float(weights_payload.get('asph_contam') or weights_payload.get('contam') or 5.00),
             )
 
             result = run_calibration(
@@ -847,19 +1010,21 @@ def launch_web_ui():
             fig_json = plot_calibration_results(result)
 
             return jsonify({
-                'ok':                True,
-                'success':           result.success,
+                'ok': True,
+                'success': result.success,
+                'profile': requested_profile or save_name,
+                'profile_kind': 'legacy',
                 'calibrated_params': result.calibrated_params,
-                'cost_initial':      result.cost_initial,
-                'cost_final':        result.cost_final,
-                'improvement_pct':   result.improvement_pct,
-                'n_points':          result.n_operating_points,
-                'n_evals':           result.n_function_evals,
-                'metrics':           result.metrics,
-                'point_results':     result.point_results,
-                'message':           result.message,
-                'elapsed_s':         result.elapsed_s,
-                'figure':            json.loads(fig_json),
+                'cost_initial': result.cost_initial,
+                'cost_final': result.cost_final,
+                'improvement_pct': result.improvement_pct,
+                'n_points': result.n_operating_points,
+                'n_evals': result.n_function_evals,
+                'metrics': result.metrics,
+                'point_results': result.point_results,
+                'message': result.message,
+                'elapsed_s': result.elapsed_s,
+                'figure': json.loads(fig_json),
             })
         except Exception as e:
             import traceback
@@ -870,9 +1035,14 @@ def launch_web_ui():
     @app.route('/api/calibration/load/<name>', methods=['GET'])
     def api_calib_load_by_name(name):
         try:
-            from plant_calibration import load_profile
-            params = load_profile(name)
-            return jsonify({'ok': True, 'params': params, 'profile': name})
+            loaded = load_ui_calibration_profile(name)
+            return jsonify({
+                'ok': True,
+                'params': loaded['params'],
+                'profile': loaded['name'],
+                'profile_kind': loaded['kind'],
+                'profile_data': loaded['profile'],
+            })
         except Exception as e:
             return jsonify({'ok': False, 'error': str(e)})
 
