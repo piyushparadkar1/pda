@@ -101,19 +101,57 @@ class ParallelCalibrationTests(unittest.TestCase):
                 'dao_ccr_wt_pct': 1.5,
                 'dao_asphaltene_wt_pct': 0.2,
             },
+            {
+                'event_ts': pd.Timestamp('2026-01-01 01:00:00'),
+                'usable_core_row': True,
+                'feed_density_kg_m3': 1030.0,
+                'feed_CCR_wt_pct': 23.1,
+                'feed_visc_135_cst': 235.0,
+                'feed_flow_a_m3hr': 42.0,
+                'feed_flow_b_m3hr': 36.0,
+                'feed_temp_a_C': 85.0,
+                'feed_temp_b_C': 84.0,
+                'top_temp_a_C': 93.0,
+                'top_temp_b_C': 92.0,
+                'mid_temp_a_C': 81.0,
+                'mid_temp_b_C': 80.0,
+                'bottom_temp_a_C': 73.0,
+                'bottom_temp_b_C': 72.0,
+                'primary_prop_a': 185.0,
+                'primary_prop_b': 158.0,
+                'secondary_prop_a': 46.0,
+                'secondary_prop_b': 41.0,
+                'dao_yield_vol_pct': 22.0,
+                'dao_visc_100_cst': 40.0,
+                'dao_ccr_wt_pct': 1.8,
+                'dao_asphaltene_wt_pct': 0.3,
+            },
         ]))
         weights = ParallelCalibrationWeights(DAO_yield=1.0, DAO_viscosity=0.5, DAO_CCR=2.0, DAO_asphaltene=3.0)
         history = []
-        with patch('parallel_calibration.simulate_parallel_point', return_value={
-            'DAO_yield': 20.0,
-            'DAO_viscosity': 30.0,
-            'DAO_CCR': 1.0,
-            'DAO_asphaltene': 0.1,
-            'train_a_converged': True,
-            'train_b_converged': True,
-            'converged': True,
-            'raw_prediction': None,
-        }):
+        predictions = [
+            {
+                'DAO_yield': 20.0,
+                'DAO_viscosity': 30.0,
+                'DAO_CCR': 1.0,
+                'DAO_asphaltene': 0.1,
+                'train_a_converged': True,
+                'train_b_converged': True,
+                'converged': True,
+                'raw_prediction': None,
+            },
+            {
+                'DAO_yield': 21.0,
+                'DAO_viscosity': 39.0,
+                'DAO_CCR': 2.0,
+                'DAO_asphaltene': 0.4,
+                'train_a_converged': True,
+                'train_b_converged': True,
+                'converged': True,
+                'raw_prediction': None,
+            },
+        ]
+        with patch('parallel_calibration.simulate_parallel_point', side_effect=predictions * 2):
             residuals = build_parallel_residuals(
                 np.array(list(DEFAULT_PARAMS.values()), dtype=float),
                 pts,
@@ -121,12 +159,18 @@ class ParallelCalibrationTests(unittest.TestCase):
                 history,
             )
             metrics, results = compute_parallel_metrics(np.array(list(DEFAULT_PARAMS.values()), dtype=float), pts)
-        np.testing.assert_allclose(residuals, np.array([2.0, -1.0, -1.0, -0.3]))
+        np.testing.assert_allclose(
+            residuals,
+            np.array([2.0, -1.0, -1.0, -0.3, -1.0, -0.5, 0.4, 0.3]),
+        )
         self.assertEqual(len(history), 1)
-        self.assertEqual(metrics['DAO_yield']['MAE'], 2.0)
-        self.assertEqual(metrics['DAO_viscosity']['bias'], -2.0)
+        self.assertEqual(metrics['DAO_yield']['MAE'], 1.5)
+        self.assertEqual(metrics['DAO_yield']['MAPE'], 7.8283)
+        self.assertEqual(metrics['DAO_yield']['R2'], 0.375)
+        self.assertEqual(metrics['DAO_viscosity']['bias'], -1.5)
+        self.assertEqual(metrics['DAO_viscosity']['R2'], 0.8438)
         self.assertEqual(results[0]['error']['DAO_CCR'], -0.5)
-        self.assertEqual(metrics['convergence']['converged_points'], 1)
+        self.assertEqual(metrics['convergence']['converged_points'], 2)
         self.assertTrue(results[0]['included_in_metrics'])
 
     def test_build_parallel_residuals_penalizes_nonconverged_predictions(self):

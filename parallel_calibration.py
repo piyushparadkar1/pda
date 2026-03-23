@@ -225,6 +225,8 @@ def compute_parallel_metrics(
     params = DEFAULT_PARAMS.copy()
     params.update(dict(zip(param_names, x_vec)))
     errors = {'DAO_yield': [], 'DAO_viscosity': [], 'DAO_CCR': [], 'DAO_asphaltene': []}
+    actuals = {'DAO_yield': [], 'DAO_viscosity': [], 'DAO_CCR': [], 'DAO_asphaltene': []}
+    predictions = {'DAO_yield': [], 'DAO_viscosity': [], 'DAO_CCR': [], 'DAO_asphaltene': []}
     results = []
     n_converged = 0
     for pt in dataset:
@@ -250,22 +252,36 @@ def compute_parallel_metrics(
         for key, plant_val in mappings:
             if plant_val is not None and pred['converged']:
                 sim_val = float(pred[key])
-                err = sim_val - float(plant_val)
+                plant_val = float(plant_val)
+                err = sim_val - plant_val
                 errors[key].append(err)
+                actuals[key].append(plant_val)
+                predictions[key].append(sim_val)
                 row['sim'][key] = round(sim_val, 4)
-                row['plant'][key] = round(float(plant_val), 4)
+                row['plant'][key] = round(plant_val, 4)
                 row['error'][key] = round(float(err), 4)
         results.append(row)
     metrics = {}
     for key, errs in errors.items():
         if errs:
             arr = np.array(errs, dtype=float)
-            metrics[key] = {
+            metric_row = {
                 'MAE': round(float(np.mean(np.abs(arr))), 4),
                 'RMSE': round(float(np.sqrt(np.mean(arr ** 2))), 4),
                 'bias': round(float(np.mean(arr)), 4),
                 'n': int(len(arr)),
             }
+            act = np.array(actuals[key], dtype=float)
+            pred_arr = np.array(predictions[key], dtype=float)
+            nonzero = np.abs(act) > 1e-12
+            if np.any(nonzero):
+                metric_row['MAPE'] = round(float(np.mean(np.abs(arr[nonzero] / act[nonzero])) * 100.0), 4)
+            if key in {'DAO_yield', 'DAO_viscosity'} and len(act) >= 2:
+                ss_tot = float(np.sum((act - np.mean(act)) ** 2))
+                if ss_tot > 1e-12:
+                    ss_res = float(np.sum((pred_arr - act) ** 2))
+                    metric_row['R2'] = round(float(1.0 - ss_res / ss_tot), 4)
+            metrics[key] = metric_row
     metrics['convergence'] = {
         'n_points': int(len(dataset)),
         'converged_points': int(n_converged),

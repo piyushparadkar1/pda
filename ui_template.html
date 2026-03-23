@@ -763,11 +763,12 @@ asph_contam         &mdash; Measured asph. contamination [wt%]  (can be blank)</
       <div>
         <label class="slabel">Load Calibration Profile</label>
         <div style="display:flex;gap:8px">
-          <select id="cal_profile" style="flex:1"></select>
+          <select id="cal_profile" style="flex:1" onchange="updateCalibrationInputMode()"></select>
           <button onclick="loadProfile()" class="btn-sm">Load</button>
         </div>
       </div>
-      <div>
+      <div id="cal_mode_note" style="font-size:11px;color:var(--text2)"></div>
+      <div id="legacy_calibration_inputs">
         <label class="slabel">Plant Data (CSV)</label>
         <div class="csv-drop" id="csv_drop_area" ondragover="event.preventDefault()" ondrop="handleDrop(event)" onclick="document.getElementById('csv_file_input').click()">
           <div id="csv_file_name">Click or drag CSV file here</div>
@@ -775,19 +776,36 @@ asph_contam         &mdash; Measured asph. contamination [wt%]  (can be blank)</
         </div>
         <textarea id="csv_textarea" placeholder="Or paste CSV data here..." rows="4" style="width:100%;margin-top:6px;background:var(--bg4);border:1px solid var(--border2);border-radius:var(--rad2);color:var(--text);padding:8px;font-size:11px;font-family:monospace;resize:vertical;outline:none"></textarea>
       </div>
+      <div id="parallel_calibration_inputs" style="display:none">
+        <label class="slabel">Parallel Calibration Workbooks</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+          <div>
+            <div style="font-size:11px;color:var(--text2);margin-bottom:4px">LIMS workbook</div>
+            <input type="file" id="lims_workbook_input" accept=".xlsx,.xls" style="width:100%">
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text2);margin-bottom:4px">Extractor workbook</div>
+            <input type="file" id="extractor_workbook_input" accept=".xlsx,.xls" style="width:100%">
+          </div>
+        </div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text3)">
+          Parallel profiles use workbook ingestion plus the two-train predictor; they do not run through the legacy single-train CSV calibrator.
+        </div>
+      </div>
       <div>
         <label class="slabel">Optimisation Weights</label>
         <div class="wt-grid">
           <div><label class="slabel">DAO Yield</label><div class="slider-row"><input type="range" id="wt_yield" min="0" max="2" step="0.1" value="1.0" oninput="sync('wt_yield','wt_y_n',this.value)"><input type="number" id="wt_y_n" class="snum" value="1.0" step="0.1" oninput="sync('wt_y_n','wt_yield',this.value)"></div></div>
           <div><label class="slabel">CCR</label><div class="slider-row"><input type="range" id="wt_ccr" min="0" max="2" step="0.1" value="1.0" oninput="sync('wt_ccr','wt_c_n',this.value)"><input type="number" id="wt_c_n" class="snum" value="1.0" step="0.1" oninput="sync('wt_c_n','wt_ccr',this.value)"></div></div>
-          <div><label class="slabel">Density</label><div class="slider-row"><input type="range" id="wt_density" min="0" max="2" step="0.1" value="0.5" oninput="sync('wt_density','wt_d_n',this.value)"><input type="number" id="wt_d_n" class="snum" value="0.5" step="0.1" oninput="sync('wt_d_n','wt_density',this.value)"></div></div>
+          <div id="legacy_density_weight"><label class="slabel">Density</label><div class="slider-row"><input type="range" id="wt_density" min="0" max="2" step="0.1" value="0.5" oninput="sync('wt_density','wt_d_n',this.value)"><input type="number" id="wt_d_n" class="snum" value="0.5" step="0.1" oninput="sync('wt_d_n','wt_density',this.value)"></div></div>
+          <div id="parallel_viscosity_weight" style="display:none"><label class="slabel">DAO Viscosity</label><div class="slider-row"><input type="range" id="wt_viscosity" min="0" max="2" step="0.1" value="0.2" oninput="sync('wt_viscosity','wt_v_n',this.value)"><input type="number" id="wt_v_n" class="snum" value="0.2" step="0.1" oninput="sync('wt_v_n','wt_viscosity',this.value)"></div></div>
           <div><label class="slabel">Contamination</label><div class="slider-row"><input type="range" id="wt_contam" min="0" max="2" step="0.1" value="1.0" oninput="sync('wt_contam','wt_cn_n',this.value)"><input type="number" id="wt_cn_n" class="snum" value="1.0" step="0.1" oninput="sync('wt_cn_n','wt_contam',this.value)"></div></div>
         </div>
       </div>
       <div style="display:flex;gap:8px">
         <button onclick="runCalibration()" style="flex:1;padding:8px;background:linear-gradient(135deg,var(--accent2),var(--green));color:#fff;border:none;border-radius:var(--rad2);cursor:pointer;font-size:12px;font-weight:600">Run Calibration</button>
         <button onclick="saveProfile()" class="btn-sm">Save Profile</button>
-        <button onclick="downloadSampleCSV()" class="btn-sm" title="Download a sample CSV template">&#8659; Sample CSV</button>
+        <button onclick="downloadSampleCSV()" id="sample_csv_btn" class="btn-sm" title="Download a sample CSV template">&#8659; Sample CSV</button>
       </div>
       <div id="cal_status" style="font-size:11px;color:var(--text2)"></div>
       <pre class="cal-results" id="cal_results"></pre>
@@ -1132,11 +1150,39 @@ async function charFeed(){
 }
 
 let calCSVData='';
+let calProfilesByName={};
 function handleCSVFile(inp){const f=inp.files[0];if(!f)return;const r=new FileReader();r.onload=e=>{calCSVData=e.target.result;g('csv_textarea').value=calCSVData;g('csv_file_name').textContent=f.name;g('csv_drop_area').classList.add('has-file')};r.readAsText(f)}
 function handleDrop(e){e.preventDefault();const f=e.dataTransfer.files[0];if(f){const i=document.createElement('input');i.type='file';const dt=new DataTransfer();dt.items.add(f);i.files=dt.files;handleCSVFile(i)}}
 
+function selectedCalibrationKind(){
+  const sel=g('cal_profile');
+  if(!sel)return'legacy';
+  const opt=sel.options[sel.selectedIndex];
+  return opt&&opt.dataset&&opt.dataset.kind?opt.dataset.kind:'legacy';
+}
+
+function updateCalibrationInputMode(){
+  const kind=selectedCalibrationKind();
+  const isParallel=kind==='parallel';
+  if(g('legacy_calibration_inputs'))g('legacy_calibration_inputs').style.display=isParallel?'none':'block';
+  if(g('parallel_calibration_inputs'))g('parallel_calibration_inputs').style.display=isParallel?'block':'none';
+  if(g('legacy_density_weight'))g('legacy_density_weight').style.display=isParallel?'none':'block';
+  if(g('parallel_viscosity_weight'))g('parallel_viscosity_weight').style.display=isParallel?'block':'none';
+  if(g('sample_csv_btn'))g('sample_csv_btn').style.display=isParallel?'none':'inline-flex';
+  if(g('cal_mode_note'))g('cal_mode_note').textContent=isParallel
+    ?'Parallel profile selected: the UI will load the JSON profile and run workbook-based two-train calibration.'
+    :'Legacy profile selected: the UI will run the single-train CSV calibrator.';
+}
+
 async function loadCalibrationProfiles(){
-  try{const res=await fetch('/api/calibration/profiles');const d=await res.json();if(d.ok){g('cal_profile').innerHTML=d.profiles.map(p=>`<option value="${p.name}">${p.name}</option>`).join('')}}catch(e){}
+  try{
+    const res=await fetch('/api/calibration/profiles');const d=await res.json();
+    if(d.ok){
+      calProfilesByName=Object.fromEntries((d.profiles||[]).map(p=>[p.name,p]));
+      g('cal_profile').innerHTML=(d.profiles||[]).map(p=>`<option value="${p.name}" data-kind="${p.kind||'legacy'}">${p.name}${p.kind==='parallel'?' (parallel)':''}</option>`).join('');
+      updateCalibrationInputMode();
+    }
+  }catch(e){}
 }
 async function loadProfile(){
   const name=g('cal_profile').value;if(!name)return;
@@ -1148,26 +1194,72 @@ async function loadProfile(){
       if(p.C_entrain!=null){g('C_entrain').value=p.C_entrain;g('Ce_n').value=p.C_entrain}
       if(p.k_precip!=null){g('k_precip').value=p.k_precip;g('kp_n').value=p.k_precip}
       if(p.alpha_density!=null){g('alpha_density').value=p.alpha_density;g('ad_n').value=p.alpha_density}
-      g('cal_status').textContent='Loaded: '+name}
+      updateCalibrationInputMode();
+      g('cal_status').textContent='Loaded '+(d.profile_kind||selectedCalibrationKind())+' profile: '+name}
   }catch(e){g('cal_status').textContent='Load error: '+e.message}
 }
 async function runCalibration(){
-  const csv=g('csv_textarea').value.trim()||calCSVData;
-  if(!csv){g('cal_status').textContent='No CSV data';return}
+  const profile=g('cal_profile').value||'';
+  const kind=selectedCalibrationKind();
   g('cal_status').textContent='Calibrating...';
   try{
-    const pl={csv_data:csv,weights:{yield:parseFloat(g('wt_yield').value),ccr:parseFloat(g('wt_ccr').value),density:parseFloat(g('wt_density').value),contam:parseFloat(g('wt_contam').value)}};
-    const res=await fetch('/api/calibration/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pl)});
+    let res;
+    if(kind==='parallel'){
+      const lims=g('lims_workbook_input').files[0];
+      const extractor=g('extractor_workbook_input').files[0];
+      if(!lims||!extractor){g('cal_status').textContent='Select both LIMS and extractor workbook files';return}
+      const fd=new FormData();
+      fd.append('profile',profile);
+      fd.append('profile_kind','parallel');
+      fd.append('lims_workbook',lims);
+      fd.append('extractor_workbook',extractor);
+      fd.append('wt_yield',g('wt_yield').value);
+      fd.append('wt_viscosity',g('wt_viscosity').value);
+      fd.append('wt_ccr',g('wt_ccr').value);
+      fd.append('wt_contam',g('wt_contam').value);
+      res=await fetch('/api/calibration/run',{method:'POST',body:fd});
+    }else{
+      const csv=g('csv_textarea').value.trim()||calCSVData;
+      if(!csv){g('cal_status').textContent='No CSV data';return}
+      const pl={
+        profile,
+        profile_kind:'legacy',
+        csv_data:csv,
+        weights:{
+          DAO_yield:parseFloat(g('wt_yield').value),
+          DAO_CCR:parseFloat(g('wt_ccr').value),
+          DAO_density:parseFloat(g('wt_density').value),
+          asph_contam:parseFloat(g('wt_contam').value)
+        }
+      };
+      res=await fetch('/api/calibration/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(pl)});
+    }
     const d=await res.json();
     if(d.ok){
       const cr=g('cal_results');cr.style.display='block';
-      cr.textContent=JSON.stringify(d.best_params,null,2)+'\n\nRMSE: '+(d.final_rmse||'\u2014');
-      if(d.best_params&&d.best_params.K_multiplier){g('K_multiplier').value=d.best_params.K_multiplier;g('Km_n').value=d.best_params.K_multiplier}
-      g('cal_status').textContent='Complete'
+      const params=d.calibrated_params||{};
+      cr.textContent=JSON.stringify({
+        profile:d.profile,
+        profile_kind:d.profile_kind,
+        calibrated_params:params,
+        metrics:d.metrics,
+        n_points:d.n_points,
+        n_rows_loaded:d.n_rows_loaded,
+        message:d.message
+      },null,2);
+      if(params.K_multiplier!=null){g('K_multiplier').value=params.K_multiplier;g('Km_n').value=params.K_multiplier}
+      if(params.E_murphree!=null){g('E').value=params.E_murphree;g('E_n').value=params.E_murphree}
+      if(params.delta_crit!=null){g('delta_crit').value=params.delta_crit;g('dc_n').value=params.delta_crit}
+      if(params.C_entrain!=null){g('C_entrain').value=params.C_entrain;g('Ce_n').value=params.C_entrain}
+      if(params.k_precip!=null){g('k_precip').value=params.k_precip;g('kp_n').value=params.k_precip}
+      if(params.alpha_density!=null){g('alpha_density').value=params.alpha_density;g('ad_n').value=params.alpha_density}
+      const conv=d.metrics&&d.metrics.convergence?d.metrics.convergence:{};
+      g('cal_status').textContent='Complete · '+(d.profile_kind||kind)+' · '+(conv.converged_points!=null?`${conv.converged_points}/${conv.n_points} converged`:`${d.n_points||0} points`)
     }else g('cal_status').textContent='Error: '+d.error
   }catch(e){g('cal_status').textContent='Error: '+e.message}
 }
 async function saveProfile(){
+  if(selectedCalibrationKind()==='parallel'){g('cal_status').textContent='Saving custom parallel profiles from the UI is not supported yet.';return}
   const name=prompt('Profile name:');if(!name)return;
   const params={K_multiplier:parseFloat(g('K_multiplier').value),E_murphree:parseFloat(g('E').value),delta_crit:parseFloat(g('delta_crit').value),C_entrain:parseFloat(g('C_entrain').value),k_precip:parseFloat(g('k_precip').value),alpha_density:parseFloat(g('alpha_density').value)};
   try{
@@ -1179,6 +1271,7 @@ async function saveProfile(){
 }
 
 loadCalibrationProfiles();
+updateCalibrationInputMode();
 setMode('operator');
 updateFeedFlowHint();
 updateAPIDisplay();
